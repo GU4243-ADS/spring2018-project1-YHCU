@@ -1,0 +1,284 @@
+---
+title: "Project1 SPOOKY Text Analysis & Author Identification"
+author: "Yang He yh2825"
+date: "January 29th, 2018"
+output: 
+  html_document: default
+  pdf_document: default
+---
+```{r}
+
+```
+
+# Section 0: Install required packages & dependencies. Load libraries & functions.
+```{r, message=FALSE, warning=FALSE}
+# data manipulation packages
+library(dplyr)
+library(tidyverse)
+library(tidytext)
+library(tidyr)
+
+# visualization packages
+library(ggplot2)
+library(ggridges)
+library(scales)
+
+# NLP packages
+library(wordcloud)
+library(ngram)
+library(qdap)
+library(SnowballC)
+library(stringr)
+library(coreNLP)
+library(cleanNLP)
+
+
+# required functions
+source("../lib/coreNLPfunctions.R")
+
+# connect to remote NLP server
+
+```
+
+
+# Section 1: Read in the data, observe data pattern and check empty entries.
+The dataset 'spooky.csv' is in '../data/' folder. Read in the data containing the headers. Then check the summary, the headers, and if there are empty entries in the dataset.
+
+```{r}
+spooky <- read.csv('../data/spooky.csv', as.is=TRUE, header=TRUE)
+head(spooky)
+summary(spooky)
+sum(is.na(spooky))
+```
+
+The dataset has three columns: 'id' (id for excerpts), 'text' (excerpt content), 'author' (acronym for author name). There is no empty entries in the dataset. Change 'author' to be a factor variable for easier data manipulation later.
+
+```{r}
+spooky$author <- as.factor(spooky$author)
+```
+
+# Section 2: Exploratory Analysis
+
+Now that the cleaned up dataset is ready, an exploratory analysis of the data would hopefully provide some intuitions and insights for author identification purpose. The end goal here is to identify several plausible methods and metrics for author identification, and they will be tested with a simple prediction model at the end of this project to show the validitiy of these metrics.  
+
+## Count appearances for each author
+
+First, we want to know how this dataset is distributed across different authors.
+
+```{r}
+total_count <- nrow(spooky)
+
+author_count <- spooky %>%
+  group_by(author) %>%
+  summarize(count = n())
+
+
+ggplot(author_count, aes(x = author, y = count, fill = author)) + 
+  geom_col() +
+  geom_label(aes(label = percent(count/total_count),
+                fill = "white",
+                size=3.5),
+                position = "identity") +
+  xlab(NULL) +
+  ylab("Count by Author") +
+  theme(legend.position = 'none')
+```
+
+This shows that the dataset is not evenly distributed across different authors. 'EAP' has 40.3% of the excerpts, while 'HPL' and 'MWS' cover 28.8% and 30.9% respectively. Therefore, to show that an author identification method to be effective, these percentages are the "baseline" for prediction accuracies: any accuracy below than these for respective author are worse than a random guess.
+
+## Average excerpt length and length density
+
+Second, check the excerpt length to see if there is a pattern. Plot both the average length histogram and density graph. Notice that the length are measured by word count (i.e. how many words are in the excerpt). The 'wc' function in 'qdap' package provides word count on sentences.
+
+```{r}
+spooky_count <- spooky %>%
+  mutate(length = wc(text))
+
+word_count <- spooky_count %>%
+  group_by(author) %>%
+  summarize(avg_length = mean(as.numeric(length)))
+
+ggplot(word_count, aes(x = author, y = avg_length, fill = author)) +
+  geom_col() +
+  geom_label(aes(label = format(avg_length, digits = 4),
+                fill = "white",
+                size=3.5),
+                position = "identity") +
+  xlab(NULL) +
+  ylab("Average Word Count") +
+  theme(legend.position = 'none')
+
+ggplot(spooky_count) +
+  geom_density_ridges(aes(length, author, fill = author)) +
+  scale_x_log10() +
+  theme(legend.position = 'none') +
+  labs(x = "Word Count Density [# of words]")
+```
+
+On average, 'EAP''s excerpts are a bit shorter, but there is no significant differece on the average between the three. However, 'EAP' excerpts are distributed more evenly on length than the other two.
+
+# Section 3: Text Analysis
+
+After analyzing how the dataset is structured, we want to dive deeper into the text and find out the differences. 
+
+## Most frequent words and n-grams
+
+Here, we want to have a better understanding of the most frequent words or phrases that the three different authors would prefer - not only by choices of words, but also phrases. The intuition is that when filtering out stopwords one by one, sometimes the context is dropped; however, word context is also a demonstration of writing styles. 
+
+First, use 'unnest_tokens()' function in 'tidytext' package to tokenize all the words in the dataset. Then use 'stop_words' dictionary in 'tidytext' package to filter out words that does not necessarily impose emotions. Lastly, use 'wordStem' function in 'SnowballC' package to find stems for all the words.
+
+```{r}
+spooky_filtered <- spooky %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word") %>%
+  mutate(word = wordStem(word))
+```
+
+Then we find the most frequently used words. Here we want to find the most frequently used words across the overall dataset, and then compare between the authors - if we do it for each author, it will not facilitate cross comparison well. As one could imagine, there are definitely some common words that are shared among the authors, words like 'mind', 'time' or 'night' (since it's a SPOOKY dataset). The goal here is to find the differences between these common words.
+
+```{r}
+freq_word_author <- spooky_filtered %>%
+  group_by(author, word) %>%
+  summarize(count = n())
+
+freq_word <- spooky_filtered %>%
+  group_by(word) %>%
+  summarize(tcount = n())
+
+freq_word_author <- freq_word_author %>%
+  left_join(freq_word, by = "word") %>%
+  arrange(desc(tcount)) %>%
+  head(60) %>% # top 20 for each author
+  ungroup()
+ 
+ggplot(freq_word_author, aes(reorder(word, tcount, FUN = min), y = count, fill = author)) +
+  geom_col() +
+  labs(x = NULL, y = "Frequency") +
+  theme(legend.position = "none") +
+  facet_wrap(~ author) +
+  coord_flip()
+```
+
+It would be a reasonable guess to say that 'MWS''s story is based on "love life", mostly. Words like "friend" and "heart" also appears more in 'MWS' than others, which possibly suggests that her story happens most likely in a social context. 'HPL''s story seems to happen a lot in "house" and at "night", while in 'EAP''s story stuff happens to be "found" and "appear" more often, maybe suggesting that there are more elements of surprise.
+
+Next, let's study bigrams...
+
+```{r}
+spooky_bigram <- spooky %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+spooky_bigram_filtered <- spooky_bigram %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  unite(bigram, word1, word2, sep = " ")
+
+spooky_bigram_count_by_author <- spooky_bigram_filtered %>%
+  group_by(author, bigram) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>%
+  ungroup() %>%
+  mutate(bigram = factor(bigram, levels = rev(unique(bigram)))) %>%
+  group_by(author) %>%
+  top_n(10, count) %>%
+  ungroup()
+  
+ggplot(spooky_bigram_count_by_author, aes(bigram, count, fill = author)) + 
+  geom_col() +
+  labs(x = NULL, y = "Bigrams frequency") +
+  theme(legend.position = "none") +
+  facet_wrap(~ author, ncol = 3, scales = "free") +
+  coord_flip()
+```
+
+And trigrams.
+
+```{r}
+spooky_trigram <- spooky %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3) %>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ")
+
+spooky_trigram_filtered <- spooky_trigram %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  filter(!word3 %in% stop_words$word) %>%
+  unite(trigram, word1, word2, word3, sep = " ")
+
+spooky_trigram_count_by_author <- spooky_trigram_filtered %>%
+  group_by(author, trigram) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>%
+  ungroup() %>%
+  mutate(trigram = factor(trigram, levels = rev(unique(trigram)))) %>%
+  group_by(author) %>%
+  top_n(10, count) %>%
+  filter(count > 1) %>% # MWS does not have a lot repeated trigrams...
+  ungroup()
+
+ggplot(spooky_trigram_count_by_author, aes(trigram, count, fill = author)) +
+  geom_col() +
+  labs(x = NULL, y = "Trigrams frequency") +
+  theme(legend.position = "none") +
+  facet_wrap(~ author, ncol = 3, scales = "free") +
+  coord_flip()
+```
+
+EAP: "ha ha".
+HPL: "heh heh".
+MWS: "...".
+
+Besides EAP and HPL's laughter and MWS's slience, there are some characteristics differ from that of single words:
+* A lot of the bigrams and trigrams are name specific, these will quickly help us to identify the author - and it should be one of the most features when doing author identification.
+* HPL's story happens when the "waning moon" appears, and this coincides with his relatively higher frequency of "night" in the single word analysis; same thing with the "shunned house" or "ancient house" in the bigram analysis, as "house" appears quite often singly as well.
+* MWS hardly ever repeats three words together, with only seven trigrams has frequency > 1 - although she does use "thousand times" repeatly. In both her bigrams and trigrams, she likes to describe a person through the "eyes".
+
+
+## Clauses and sentence structure
+
+HPL's work is 100 years earlier than the other two authors. Besides, although the excerpts share the same language, the authors came from different places. It is possible that the different language practices will have an effect on the usage of sentence structures, clauses etc.
+
+### Commas and semi-colomns
+
+Let's look at how often does these authors uses commas and semi-colomns. Define the metric to be number of words in the excerpt per comma or semi-colomn used, and find the averages and frequency densities. 
+
+```{r}
+spooky_punc_count <- spooky_count %>%
+  mutate(comma_count = str_count(text, ',')) %>%
+  mutate(sc_count = str_count(text, ';')) %>%
+  mutate(quote_count = str_count(text, '\"')) %>%
+  mutate(ratio = (comma_count+sc_count)/length)
+
+spooky_punc_avg <- spooky_punc_count %>%
+  group_by(author) %>%
+  summarize(avg = format(mean(comma_count + quote_count), digits = 2))
+
+ggplot(spooky_punc_avg, aes(x = author, y = avg, fill = author)) +
+  geom_col() +
+  geom_label(aes(label = avg,
+                fill = "white",
+                size=3.5),
+                position = "identity") +
+  xlab(NULL) +
+  ylab("Average number of commas + semi-colomns") +
+  theme(legend.position = 'none')
+
+ggplot(subset(spooky_punc_count, ratio > 0)) +
+  geom_density_ridges(aes(ratio, author, fill = author)) +
+  scale_x_continuous() +
+  theme(legend.position = 'none') +
+  labs(x = "Punctuation Density [# of (commas + semi-colomns) / # of words] (Exclude ratio = 0)")
+```
+
+
+HPL seems to use commas and semi-colomns a lot less often than the other two authors, meaning typically his subsentences are longer. For MWS and EAP, the density distribution appears to be similar, althought MWS on average uses less punctuations per excerpt.
+
+### Clauses and part of speech
+
+```{r}
+cnlp_init_udpipe()
+spooky_tmp <- spooky
+spooky_tmp$author <- as.data.frame(spooky$author)
+
+obj <- cnlp_annotate(spooky_tmp)
+```
+
