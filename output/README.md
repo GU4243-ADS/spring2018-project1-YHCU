@@ -1,4 +1,5 @@
 # Project 1: 
 ### Output folder
 
-The output directory contains analysis output, processed datasets, logs, or other processed things.
+This folder contains one pre-processed annotation object obtained by applying the cleanNLP package. In the Rmd file in the doc folder, the 'cnlp.rds' file is documented with obtain method and use.
+

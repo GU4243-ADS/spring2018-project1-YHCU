@@ -1,22 +1,28 @@
 ---
-title: "Project1 SPOOKY Text Analysis & Author Identification"
+title: "Project1 SPOOKY Data Analysis"
 author: "Yang He yh2825"
 date: "January 29th, 2018"
-output: 
-  html_document: default
+output:
   pdf_document: default
+  html_document: default
 ---
-```{r}
-
-```
 
 # Section 0: Install required packages & dependencies. Load libraries & functions.
 ```{r, message=FALSE, warning=FALSE}
+packages.used <- c("dplyr", "tidyverse", "tidytext", "tidyr", "ggplot2", "reshape2", "ggridges", "scales", "wordcloud", "ngram", "qdap", "SnowballC", "stringr", "cleanNLP", "spacyr", "udpipe", "topicmodels")
+
+packages.needed <- setdiff(packages.used, intersect(installed.packages()[,1], packages.used))
+
+if(length(packages.needed) > 0) {
+  install.packages(packages.needed, dependencies = TRUE, repos = 'http://cran.us.r-project.org')
+}
+
 # data manipulation packages
 library(dplyr)
 library(tidyverse)
 library(tidytext)
 library(tidyr)
+library(reshape2)
 
 # visualization packages
 library(ggplot2)
@@ -29,26 +35,32 @@ library(ngram)
 library(qdap)
 library(SnowballC)
 library(stringr)
-library(coreNLP)
 library(cleanNLP)
+library(udpipe) # backend for cleanNLP package
+library(topicmodels)
 
 
 # required functions
-source("../lib/coreNLPfunctions.R")
-
-# connect to remote NLP server
+# source("../lib/coreNLPfunctions.R")
 
 ```
 
 
 # Section 1: Read in the data, observe data pattern and check empty entries.
-The dataset 'spooky.csv' is in '../data/' folder. Read in the data containing the headers. Then check the summary, the headers, and if there are empty entries in the dataset.
+The dataset 'spooky.csv' is in '../data/' folder. Read in the data containing the headers. Then check the summary, the headers, and if there are empty entries in the dataset. The commented out section is loading in the spooky dataset as a cleanNLP readable tokenized format, in the 'output' folder the data has been pre-stored since the dataset is quite large. 
 
 ```{r}
 spooky <- read.csv('../data/spooky.csv', as.is=TRUE, header=TRUE)
 head(spooky)
 summary(spooky)
 sum(is.na(spooky))
+
+# cleanNLP output pre-processing
+# spooky_tmp <- spooky
+# spooky_tmp$author <- as.data.frame(spooky_tmp$author)
+# cnlp_init_udpipe()
+# cnlpobj <- cnlp_annotate(spooky_tmp)
+# saveRDS(cnlpobj, file = "../output/cnlp.rds")
 ```
 
 The dataset has three columns: 'id' (id for excerpts), 'text' (excerpt content), 'author' (acronym for author name). There is no empty entries in the dataset. Change 'author' to be a factor variable for easier data manipulation later.
@@ -59,7 +71,7 @@ spooky$author <- as.factor(spooky$author)
 
 # Section 2: Exploratory Analysis
 
-Now that the cleaned up dataset is ready, an exploratory analysis of the data would hopefully provide some intuitions and insights for author identification purpose. The end goal here is to identify several plausible methods and metrics for author identification, and they will be tested with a simple prediction model at the end of this project to show the validitiy of these metrics.  
+Now that the cleaned up dataset is ready, an exploratory analysis of the data would hopefully provide some intuitions and insights for author identification purpose. The end goal here is to identify several plausible methods and metrics for author identification and feature engineering.
 
 ## Count appearances for each author
 
@@ -107,12 +119,14 @@ ggplot(word_count, aes(x = author, y = avg_length, fill = author)) +
   xlab(NULL) +
   ylab("Average Word Count") +
   theme(legend.position = 'none')
+ggsave("../figs/avgwc.png")
 
 ggplot(spooky_count) +
   geom_density_ridges(aes(length, author, fill = author)) +
   scale_x_log10() +
   theme(legend.position = 'none') +
   labs(x = "Word Count Density [# of words]")
+ggsave("../figs/wcdens.png")
 ```
 
 On average, 'EAP''s excerpts are a bit shorter, but there is no significant differece on the average between the three. However, 'EAP' excerpts are distributed more evenly on length than the other two.
@@ -157,6 +171,7 @@ ggplot(freq_word_author, aes(reorder(word, tcount, FUN = min), y = count, fill =
   theme(legend.position = "none") +
   facet_wrap(~ author) +
   coord_flip()
+ggsave("../figs/wf.png")
 ```
 
 It would be a reasonable guess to say that 'MWS''s story is based on "love life", mostly. Words like "friend" and "heart" also appears more in 'MWS' than others, which possibly suggests that her story happens most likely in a social context. 'HPL''s story seems to happen a lot in "house" and at "night", while in 'EAP''s story stuff happens to be "found" and "appear" more often, maybe suggesting that there are more elements of surprise.
@@ -189,6 +204,7 @@ ggplot(spooky_bigram_count_by_author, aes(bigram, count, fill = author)) +
   theme(legend.position = "none") +
   facet_wrap(~ author, ncol = 3, scales = "free") +
   coord_flip()
+ggsave("../figs/bigramf.png")
 ```
 
 And trigrams.
@@ -221,6 +237,7 @@ ggplot(spooky_trigram_count_by_author, aes(trigram, count, fill = author)) +
   theme(legend.position = "none") +
   facet_wrap(~ author, ncol = 3, scales = "free") +
   coord_flip()
+ggsave("../figs/trigramf.png")
 ```
 
 EAP: "ha ha".
@@ -228,18 +245,19 @@ HPL: "heh heh".
 MWS: "...".
 
 Besides EAP and HPL's laughter and MWS's slience, there are some characteristics differ from that of single words:
-* A lot of the bigrams and trigrams are name specific, these will quickly help us to identify the author - and it should be one of the most features when doing author identification.
-* HPL's story happens when the "waning moon" appears, and this coincides with his relatively higher frequency of "night" in the single word analysis; same thing with the "shunned house" or "ancient house" in the bigram analysis, as "house" appears quite often singly as well.
-* MWS hardly ever repeats three words together, with only seven trigrams has frequency > 1 - although she does use "thousand times" repeatly. In both her bigrams and trigrams, she likes to describe a person through the "eyes".
+
++ A lot of the bigrams and trigrams are name specific, these will quickly help us to identify the author - and it should be one of the most features when doing author identification.
++ HPL's story happens when the "waning moon" appears, and this coincides with his relatively higher frequency of "night" in the single word analysis; same thing with the "shunned house" or "ancient house" in the bigram analysis, as "house" appears quite often singly as well.
++ MWS hardly ever repeats three words together, with only seven trigrams has frequency > 1 - although she does use "thousand times" repeatly. In both her bigrams and trigrams, she likes to describe a person through the "eyes".
 
 
-## Clauses and sentence structure
+## Sentence structure and Part of speech
 
-HPL's work is 100 years earlier than the other two authors. Besides, although the excerpts share the same language, the authors came from different places. It is possible that the different language practices will have an effect on the usage of sentence structures, clauses etc.
+HPL's work is almost 100 years later than the other two authors. Besides, although the excerpts share the same language, the authors came from different places. It is possible that the different language practices will have an effect on the usage of sentence structures, clauses etc.
 
-### Commas and semi-colomns
+### Commas and semi-colons
 
-Let's look at how often does these authors uses commas and semi-colomns. Define the metric to be number of words in the excerpt per comma or semi-colomn used, and find the averages and frequency densities. 
+Let's look at how often does these authors uses commas and semi-colonns. Define the metric to be number of words in the excerpt per comma or semi-colomn used, and find the averages and frequency densities. 
 
 ```{r}
 spooky_punc_count <- spooky_count %>%
@@ -250,7 +268,7 @@ spooky_punc_count <- spooky_count %>%
 
 spooky_punc_avg <- spooky_punc_count %>%
   group_by(author) %>%
-  summarize(avg = format(mean(comma_count + quote_count), digits = 2))
+  summarize(avg = format(mean(comma_count + sc_count), digits = 2))
 
 ggplot(spooky_punc_avg, aes(x = author, y = avg, fill = author)) +
   geom_col() +
@@ -259,26 +277,252 @@ ggplot(spooky_punc_avg, aes(x = author, y = avg, fill = author)) +
                 size=3.5),
                 position = "identity") +
   xlab(NULL) +
-  ylab("Average number of commas + semi-colomns") +
+  ylab("Average number of commas + semi-colons") +
   theme(legend.position = 'none')
 
 ggplot(subset(spooky_punc_count, ratio > 0)) +
   geom_density_ridges(aes(ratio, author, fill = author)) +
   scale_x_continuous() +
   theme(legend.position = 'none') +
-  labs(x = "Punctuation Density [# of (commas + semi-colomns) / # of words] (Exclude ratio = 0)")
+  labs(x = "Punctuation Density [# of (commas + semi-colons) / # of words] (Exclude ratio = 0)")
+ggsave("../figs/puncdens.png")
 ```
 
 
-HPL seems to use commas and semi-colomns a lot less often than the other two authors, meaning typically his subsentences are longer. For MWS and EAP, the density distribution appears to be similar, althought MWS on average uses less punctuations per excerpt.
+HPL seems to use commas and semi-colomns a lot less often than the other two authors, meaning typically his subsentences are longer and sentence structure are more complex. For MWS and EAP, the density distribution appears to be similar, althought MWS on average uses less punctuations per excerpt. This would match our expectation - modern english writing are generally more complex with frequent use of clauses etc. Remember that HPL's work is about 100 years later than the other two, and we see that the difference is significant, while the earlier works show some similarity.
 
-### Clauses and part of speech
+### Part of speech
+
+Here we want to make use of the cleanNLP package with strong POS analysis feature. First, let's load in the data.
+
+```{r, warning=FALSE}
+obj <- readRDS("../output/cnlp.rds")
+spooky_id_author <- spooky %>%
+  select(id, author)
+spooky_tk <- cnlp_get_token(obj) %>%
+  mutate(word = tolower(word)) %>%
+  left_join(spooky_id_author, by = "id") 
+```
+
+The dataset has several useful columns: 'upos', 'pos', 'gender', 'tense' etc. Let's look at these interesting columns one by one, and for this part let's look at POS first:
 
 ```{r}
-cnlp_init_udpipe()
-spooky_tmp <- spooky
-spooky_tmp$author <- as.data.frame(spooky$author)
+spooky_POS <- spooky_tk %>%
+  group_by(author, upos) %>%
+  summarize(count = n()) %>%
+  ungroup()
 
-obj <- cnlp_annotate(spooky_tmp)
+tmp <- spooky_POS %>%
+  group_by(author) %>%
+  summarize(total = sum(count))
+
+spooky_POS_tmp <- spooky_POS %>%
+  left_join(tmp, by = "author") %>%
+  filter(upos %in% c("ADJ", "ADV", "NOUN", "VERB", "PRON"))
+
+ggplot(spooky_POS_tmp, aes(x = upos, y = (count/total), fill = author)) +
+  geom_col() +
+  geom_label(aes(label = percent(count/total),
+                fill = "white",
+                size=3.5),
+                position = "identity") +
+  xlab(NULL) +
+  ylab("POS percentage") +
+  facet_wrap(~ author) +
+  theme(legend.position = 'none')
+ggsave("../figs/POS.png")
+  
 ```
+
+'EAP' and 'HPL' seem to have similar distributions of POS; however, MWS use pronouns a lot often, suggesting that there are more third-person narratives in MWS's work.
+
+### Masculine or Feminine?
+
+Although we are looking into horror story excerpts, it might be still interesting to look at how the authors chose their wording according to gender. This gives us an easier way to see whether the main protagonist of the story is male or female, and may indicate the author's preference.
+
+```{r}
+spooky_MF <- spooky_tk %>%
+  filter(!is.na(gender)) %>%
+  group_by(author, gender) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+tmp <- spooky_MF %>%
+  group_by(author) %>%
+  summarize(total = sum(count))
+
+spooky_MF_tmp <- spooky_MF %>%
+  left_join(tmp, by = "author")
+
+ggplot(spooky_MF_tmp, aes(x = gender, y = (count/total), fill = author)) +
+  geom_col() +
+  geom_label(aes(label = percent(count/total),
+                fill = "white",
+                size=3.5),
+                position = "identity") +
+  xlab(NULL) +
+  ylab("Gender percentage") +
+  facet_wrap(~ author) +
+  theme(legend.position = 'none')
+ggsave("../figs/gender.png")
+```
+
+The three authors all show distinct pattern. MWS is the only female writer among the three and she reasonably uses more feminine words, suggesting that there may be a decent comparison of genders in MWS's story, possibly a story of "love" as indicated in the frequent word analysis. HPL's writing is a lot more "masculine" as only 3.3% is feminine word. EAP uses more neutural words than the other two.
+
+### Tense Use
+
+The 'tense' column only has two values: past and present. Let's see the distribution between these two tenses.
+
+```{r}
+spooky_tense <- spooky_tk %>%
+  filter(!is.na(tense)) %>%
+  group_by(author, tense) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+tmp <- spooky_tense %>%
+  group_by(author) %>%
+  summarize(total = sum(count))
+
+spooky_tense_tmp <- spooky_tense %>%
+  left_join(tmp, by = "author")
+
+ggplot(spooky_tense_tmp, aes(x = tense, y = (count/total), fill = author)) +
+  geom_col() +
+  geom_label(aes(label = percent(count/total),
+                fill = "white",
+                size=3.5),
+                position = "identity") +
+  xlab(NULL) +
+  ylab("Tense percentage") +
+  facet_wrap(~ author) +
+  theme(legend.position = 'none')
+ggsave("../figs/tense.png")
+```
+
+Past Tense Usage: HPL > MWS > EAP. A higher percentage of use of past tense might indicate more story-telling narrative in the excerpts, or possibly more  
+
+# Section 4: Sentiment Analysis
+
+For sentiment analysis of the excerpts, the bing sentiment lexicon is used, which provides a binary (positive/negative) result. The goal here is to compare the most frequently used negative and positive words used by different authors, and see the density of positive/negative words per sentence.
+
+## Wordclound for positive & negative words
+
+First, genenerate the sentiment table by inner joining with the bing lexicon.
+
+```{r}
+spooky_stmt <- inner_join(spooky_filtered, get_sentiments('bing'), by = "word")
+```
+
+Then, generate a word cloud for each of the authors, separating between negative and positive words.
+
+For EAP:
+
+```{r, warning=FALSE}
+# EAP
+# png("../figs/stmtEAP.png")
+spooky_stmt %>%
+  filter(author == "EAP") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(max.words = 20, title.size = 2) 
+# dev.off()
+```
+
+For HPL: 
+
+```{r, warning=FALSE}
+# HPL
+# png("../figs/stmtHPL.png")
+spooky_stmt_HPL <- spooky_stmt %>%
+  filter(author == "HPL") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(max.words = 20, title.size = 2)
+# dev.off()
+```
+
+For MWS:
+
+```{r, warning=FALSE}
+# MWS
+# png("../figs/stmtMWS.png")
+spooky_stmt_MWS <- spooky_stmt %>%
+  filter(author == "MWS") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(max.words = 20, title.size = 2) 
+# dev.off()
+```
+
+The word scales is weird for MWS because "love" was such a big part of it that other words become much smaller comparing to it - still very consistent with our previous analysis. 
+
+## Density for positive word frequency
+
+For each sentence, let us find the percentage ratio of positive words to the total number of words with either positive or negative sentiment. Then we show the density graphs for the three authors. 
+
+```{r}
+spooky_stmt_density <- spooky_stmt %>%
+  group_by(author, id, sentiment) %>%
+  summarize(count = n()) %>%
+  spread(sentiment, count, fill = 0) %>%
+  group_by(author, id) %>%
+  summarize(count_negative = sum(negative), count_positive = sum(positive)) %>%
+  mutate(perc = (count_positive/(count_negative+count_positive)))
+
+ggplot(spooky_stmt_density, aes(x = perc, fill = author)) +
+  geom_density(bw = 0.2, alpha = 0.3) +
+  xlab("Percentage of positive words [# positive / (# positive + # negative)]")
+ggsave("../figs/stmtdensity.png")
+```
+
+HPL's excerpts are more negative than others', since the density where the ratio equals to zero is pretty high. The density graph is also skewed towards left more for HPL with a roughly monotounous decreasing trend, while for the other two there are slight variations. However, overall speaking, the spooky text dataset is contains more negative sentences than positive.
+
+# Section 5: Topic Modelling
+
+For the topic modelling, the goal here is to see if there is a pattern of which authors using certain topics more often than others at sentence level.  
+
+```{r}
+spooky_tm <- spooky_tk %>%
+  cnlp_get_tfidf(min_df = 0.05, max_df = 0.95, type = "tf", tf_weight = "raw") %>%
+  LDA(k = 15, control = list(verbose = 1))
+spooky_tm_topics <- tidy(spooky_tm, matrix = "gamma")
+
+spooky_author_topic <- spooky_tm_topics %>%
+  left_join(spooky, by = c("document" = "id")) %>%
+  select(-text) %>%
+  group_by(document) %>%
+  top_n(1, gamma) %>%
+  ungroup()
+
+ggplot(spooky_author_topic, aes(topic, fill = author)) +
+  geom_bar(position = "fill") +
+  xlab("Topic No.")
+ggsave("../figs/tm.png")
+```
+
+Looks like EAP leans toward topic 1 and 15; HPL leans toward topic 4; MWS leans toward topic 2 and 13. Take MWS as an example and look at all sentences in those two topics. (The order of topic no. is different each time running the above code; therefore, manually choosing the two topics with highest MWS percentage)
+
+```{r}
+# pick top 2 topic that most relates to MWS
+MWS <- spooky_author_topic %>%
+  group_by(author, topic) %>%
+  summarize(tcount = n()) %>%
+  spread(author, tcount, fill = 0) %>%
+  top_n(2, MWS/(MWS+EAP+HPL)) %>%
+  ungroup()
+
+spooky_MWS <- spooky_author_topic %>%
+  filter(topic %in% MWS$topic) %>%
+  inner_join(spooky, by = c("document" = "id")) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word") %>%
+  group_by(word) %>%
+  summarize(count = n()) %>%
+  ungroup()
+
+wordcloud(spooky_MWS$word, spooky_MWS$count, max.words = 20)
+```
+
+Looking at the wordcloud, the most frequent words do match our previous results! In fact, the dominant words matches the words that "mark" MWS's excerpts: "love", "life", "eyes" and "life"; while the rest may not appear in the most frequent words for MWS, those should be probably topic specific words.
 
